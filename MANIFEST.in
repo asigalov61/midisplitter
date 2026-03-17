@@ -1,0 +1,3 @@
+include midisplitter/README.md
+recursive-include midisplitter/ *
+recursive-include midisplitter/artwork *
