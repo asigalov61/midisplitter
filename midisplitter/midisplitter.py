@@ -200,7 +200,7 @@ def apply_sustain_to_ms_score(score):
 
 ###################################################################################
 
-instrument_name = lambda s: ''.join(c for c in s.lower() if c.isalpha() or c==' ').strip().replace('  ', '_').replace(' ', '_')
+instrument_name = lambda s: ''.join(c for c in s.lower().replace('(', ' ').replace(')', ' ').strip() if c.isalpha() or c==' ').strip().replace('  ', '_').replace(' ', '_')
 
 ###################################################################################
 
@@ -320,15 +320,21 @@ def split_midi(midi_file, output_dir=None):
         for i, (tname, tpat, score) in enumerate(all_scores):
 
             new_score = copy.deepcopy(score)
-
-            for e in new_score:
-                e[3] = 0
+            
+            if tpat < 128:
+                for e in new_score:
+                    e[3] = 0
 
             output_header = [['set_tempo', 0, 1000000],
                              ['time_signature', 0, 4, 2, 24, 8],
                              ['track_name', 0, tname],
-                             ['patch_change', 0, 0, tpat]
                             ]
+            
+            if tpat < 128:
+                output_header.append(['patch_change', 0, 0, tpat])
+                
+            else:
+                output_header.append(['patch_change', 0, 9, tpat-128])
 
             output = [1000, output_header + new_score]
             
