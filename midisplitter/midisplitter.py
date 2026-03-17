@@ -56,215 +56,95 @@ import copy
 
 from .constants import Number2patch, Number2drumkit
 
-from .MIDI import midi2ms_score, score2midi
+from .MIDI import midi2score, score2midi
 
 ###################################################################################
-###################################################################################
-
-def compute_sustain_intervals(events):
-
-    """
-    Identify and merge consecutive sustain pedal intervals from velocity events.
-    
-    Filters events where velocity >= 64 to detect pedal press and release times,
-    records the start time of each press and end time of the corresponding release,
-    and merges touching or overlapping intervals to provide continuous durations.
-    
-    Parameters
-    ----------
-    events : list of tuple
-        A list of (time, velocity) pairs representing MIDI velocity events over time.
-    
-    Returns
-    ------
-    list of tuple
-        A list of (start_time, end_time) tuples representing merged sustain intervals.
-        End times are the actual release time or infinity if the pedal is never released.
-    
-    Notes
-    -----
-    An interval is considered to start when a velocity >= 64 is received without
-    a previously open interval, and ends when velocity < 64 is received.
-    Adjacent or overlapping intervals are automatically merged into a single interval.
-    """
-
-    intervals = []
-    pedal_on = False
-    current_start = None
-    
-    for t, cc in events:
-        if not pedal_on and cc >= 64:
-
-            pedal_on = True
-            current_start = t
-        elif pedal_on and cc < 64:
-
-            pedal_on = False
-            intervals.append((current_start, t))
-            current_start = None
-
-    if pedal_on:
-        intervals.append((current_start, float('inf')))
-
-    merged = []
-    
-    for interval in intervals:
-        if merged and interval[0] <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], interval[1]))
-        else:
-            merged.append(interval)
-    return merged
-
-###################################################################################
-
-def apply_sustain_to_ms_score(score):
-
-    """
-    Apply sustain pedal intervals to midi score durations.
-    
-    Analyzes control change events (CC64) to identify sustain pedal presses and releases,
-    calculates effective note durations by extending them to the pedal release or the end of the piece,
-    and updates the note durations in the provided score.
-    
-    Args:
-        score (list): A list representing a Midi Score, where each element is a Track tuple:
-                      ((track_name, is_midi3), [list of events]).
-                      Events are tuples: (event_type, time, channel, data1, data2).
-                      event_type: 'note', 'control_change', etc.
-                      For 'note' events: time is timestamp, data2 is nominal duration.
-    
-    Returns:
-        list: The modified score with updated note durations.
-    
-    Notes:
-        - Infinite intervals (pedal held to end of score) are resolved based on a computed
-          global maximum offset derived from instrument velocity values.
-        - Only channels with active sustain intervals will have their notes extended.
-        - Intervals are only extended backward if the note starts within the sustain duration;
-          currently, the implementation extends the note off-time to match the end of the sustain
-          interval if the note's nominal off-time falls within the interval.
-    """
-
-    sustain_by_channel = {}
-    
-    for track in score[1:]:
-        for event in track:
-            if event[0] == 'control_change' and event[3] == 64:
-                channel = event[2]
-                sustain_by_channel.setdefault(channel, []).append((event[1], event[4]))
-    
-    sustain_intervals_by_channel = {}
-    
-    for channel, events in sustain_by_channel.items():
-        events.sort(key=lambda x: x[0])
-        sustain_intervals_by_channel[channel] = compute_sustain_intervals(events)
-    
-    global_max_off = 0
-    
-    for track in score[1:]:
-        for event in track:
-            if event[0] == 'note':
-                global_max_off = max(global_max_off, event[1] + event[2])
-                
-    for channel, intervals in sustain_intervals_by_channel.items():
-        updated_intervals = []
-        for start, end in intervals:
-            if end == float('inf'):
-                end = global_max_off
-            updated_intervals.append((start, end))
-        sustain_intervals_by_channel[channel] = updated_intervals
-        
-    if sustain_intervals_by_channel:
-        
-        for track in score[1:]:
-            for event in track:
-                if event[0] == 'note':
-                    start = event[1]
-                    nominal_dur = event[2]
-                    nominal_off = start + nominal_dur
-                    channel = event[3]
-                    
-                    intervals = sustain_intervals_by_channel.get(channel, [])
-                    effective_off = nominal_off
-        
-                    for intv_start, intv_end in intervals:
-                        if intv_start < nominal_off < intv_end:
-                            effective_off = intv_end
-                            break
-                    
-                    effective_dur = effective_off - start
-                    
-                    event[2] = effective_dur
-
-    return score
-
 ###################################################################################
 
 instrument_name = lambda s: ''.join(c for c in s.lower().replace('(', ' ').replace(')', ' ').strip() if c.isalpha() or c==' ').strip().replace('  ', '_').replace(' ', '_')
 
 ###################################################################################
 
+special_events = ['key_after_touch', 'control_change', 'channel_after_touch', 'pitch_wheel_change']
+
+###################################################################################
+
 def split_midi(midi_file, output_dir=None):
     
     """
-    Split a multi-track MIDI file into per‑channel, per‑instrument MIDI stems.
+    Split a MIDI file into per‑instrument stems by analyzing channels, program
+    changes, and event types, then write each stem as an individual MIDI file.
 
-    This function loads a MIDI file in TMIDIX ms-score format, normalizes and
-    cleans each track, applies sustain‑pedal expansion, and extracts all
-    note‑bearing channels as independent musical “voices.” Each resulting voice
-    is written as its own single‑track MIDI file with a standardized header,
-    a fixed tempo (1,000,000 µs per quarter), a default 4/4 time signature,
-    a track name, and a program/patch assignment.
+    This function performs a deterministic, channel‑aware decomposition of a
+    multi‑track MIDI score into separate instrument stems. Each stem contains:
 
-    Processing steps:
-    - Parse the MIDI into ms‑score format and extract ticks-per-beat and tracks.
-    - Normalize channel numbers and pitch/velocity ranges for notes and
-      patch‑change events.
-    - Apply sustain‑pedal logic to each track to ensure correct note durations.
-    - Remove all non-musical events except: note, patch_change, track_name.
-    - For each track, detect all channels that contain notes.
-    - For each channel:
-        * Collect all notes belonging to that channel.
-        * Determine the effective program/patch for that channel, including
-          drum‑kit offsets for channel 9.
-        * Rebase all events to channel 0 for output.
-        * Build a new single‑track score with a clean header and patch assignment.
-        * Write the result as a standalone MIDI file.
+    - All NOTE events belonging to a single channel within a single track.
+    - All channel‑specific expressive events (key aftertouch, control change,
+      channel aftertouch, pitch‑wheel) that target the same channel.
+    - All global, non‑channel events (e.g., track_name, meta events) merged
+      across tracks and preserved in every output stem.
+    - A single program assignment derived from the most recent patch_change
+      event on that channel, with GM drum‑kit remapping for channel 9.
 
-    Output naming:
-    - Files are named as:
-        "{index:03d}_{instrument_name}_{patch}.mid"
-      where `instrument_name` is derived from the GM program number or drum‑kit
-      mapping. Drum kits use patch numbers ≥128.
+    Processing steps
+    ----------------
+    1. Load the MIDI file using `midi2score` and extract ticks-per-beat and
+       track event lists.
+    2. Normalize NOTE and PATCH_CHANGE fields to valid MIDI ranges
+       (channels mod 16, velocities mod 128, programs mod 128).
+    3. For each track:
+       - Determine its human-readable name (or fallback to "Track #i").
+       - Build a per-channel program table from patch_change events.
+       - Collect all non-note, non-patch, non-expressive events as global
+         "other events" to be shared across all stems.
+       - Identify all channels that contain NOTE events.
+       - For each such channel, extract:
+         • NOTE events for that channel
+         • expressive events targeting that channel
+         • all global non-expressive events
+         producing one stem candidate.
+    4. For each stem:
+       - Merge in all global events from all tracks.
+       - Sort events by absolute time.
+       - Rewrite channel numbers to 0 for pitched instruments, or to 9 for
+         drum kits, depending on the resolved program.
+       - Construct a minimal header containing track_name and a single
+         patch_change event.
+       - Convert the score back to MIDI bytes via `score2midi`.
+       - Generate a filename of the form:
+         "{index}_{instrument_name}_{program}.mid"
+         using GM instrument or drum‑kit names.
+
+    Output
+    ------
+    For each detected (track, channel) instrument stem, a `.mid` file is written
+    either into `output_dir` (created if necessary) or into the current working
+    directory. Filenames encode the stem index, normalized instrument name, and
+    program number.
 
     Parameters
     ----------
     midi_file : str or Path
         Path to the input MIDI file.
     output_dir : str or Path, optional
-        Directory where the split MIDI stems will be written. If None, files
-        are written to the current working directory.
-
-    Returns
-    -------
-    None
-        The function writes one MIDI file per detected channel/voice and
-        performs no in‑memory return of the split data.
+        Directory in which to write the generated stems. If None, files are
+        written next to the input file.
 
     Notes
     -----
-    - Each output file contains exactly one musical voice (one channel’s notes).
-    - All output stems share the same fixed tempo and time signature.
-    - Drum channels are mapped to GM drum kits when possible; otherwise a
-      “custom_kit” label is used.
+    - Channel 9 (GM drums) is mapped to program numbers 128–255 internally to
+      distinguish drum kits; these are remapped back to channel 9 on output.
+    - All stems share the same ticks-per-beat value from the original file.
+    - Event ordering is strictly time‑sorted after merging global events.
+    - This function writes files to disk and returns nothing.
     """
     
-    raw_score = midi2ms_score(open(midi_file, 'rb').read())
+    raw_score = midi2score(open(midi_file, 'rb').read())
     
     # ----------------------------------------------------------------------------
 
-    num_ticks = raw_score[0]
-
+    midi_ticks = raw_score[0]
+    
     all_tracks = raw_score[1:]
 
     all_clean_tracks = []
@@ -281,14 +161,13 @@ def split_midi(midi_file, output_dir=None):
           if e[0] == 'patch_change':
               e[2] = e[2] % 16
               e[3] = e[3] % 128
-        
-        apply_sustain_to_ms_score([num_ticks, new_track])
 
-        all_clean_tracks.append([e for e in new_track if e[0] in ['note', 'patch_change', 'track_name']])
+        all_clean_tracks.append(new_track)
         
     # ----------------------------------------------------------------------------
 
     all_scores = []
+    all_other_events = []
 
     for i, track in enumerate(all_clean_tracks):
         
@@ -301,6 +180,9 @@ def split_midi(midi_file, output_dir=None):
             if e[0] == 'patch_change':
                 track_patches[e[2]] = e[3] if e[2] != 9 else e[3]+128
 
+        other_events = [e for e in track if e[0] != 'note' and e[0] != 'patch_change' and e[0] not in special_events]
+        all_other_events.extend(other_events)
+
         track_chans = sorted(set([e[3] for e in track if e[0] == 'note']))
                 
         for cha in track_chans:
@@ -310,6 +192,12 @@ def split_midi(midi_file, output_dir=None):
                 if e[0] == 'note' and e[3] == cha:
                     score.append(e)
                     
+                if e[0] in special_events and e[2] == cha:
+                    score.append(e)
+
+                if e[0] != 'note' and e[0] not in special_events:
+                    score.append(e)
+   
             if score:
                 all_scores.append([track_name, track_patches[cha], score])
     
@@ -320,15 +208,19 @@ def split_midi(midi_file, output_dir=None):
         for i, (tname, tpat, score) in enumerate(all_scores):
 
             new_score = copy.deepcopy(score)
+
+            new_score.extend(all_other_events)
+            new_score.sort(key=lambda x: x[1])
             
             if tpat < 128:
                 for e in new_score:
-                    e[3] = 0
+                    if e[0] == 'note':
+                        e[3] = 0
 
-            output_header = [['set_tempo', 0, 1000000],
-                             ['time_signature', 0, 4, 2, 24, 8],
-                             ['track_name', 0, tname],
-                            ]
+                    if e[0] in special_events:
+                        e[2] = 0
+
+            output_header = [['track_name', 0, tname]]
             
             if tpat < 128:
                 output_header.append(['patch_change', 0, 0, tpat])
@@ -336,7 +228,7 @@ def split_midi(midi_file, output_dir=None):
             else:
                 output_header.append(['patch_change', 0, 9, tpat-128])
 
-            output = [1000, output_header + new_score]
+            output = [midi_ticks, output_header + new_score]
             
             midi_data = score2midi(output)
 
