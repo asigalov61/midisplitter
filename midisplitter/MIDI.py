@@ -177,6 +177,9 @@ VersionDate = '20201120'
 # 20090319 1.2 add segment() and timeshift()
 # 20090301 1.1 add to_millisecs()
 
+enable_warnings = False
+check_midi_signature = False
+
 _previous_warning = ''  # 5.4
 _previous_times = 0     # 5.4
 #------------------------------- Encoding stuff --------------------------
@@ -309,7 +312,8 @@ def midi2opus(midi=b''):
     if id != b'MThd':
         _warn("midi2opus: midi starts with "+str(id)+" instead of 'MThd'")
         _clean_up_warnings()
-        return [1000,[],]
+        if check_midi_signature:
+            return [1000,[],]
     [length, format, tracks_expected, ticks] = struct.unpack(
      '>IHHH', bytes(my_midi[4:14]))
     if length != 6:
@@ -1185,14 +1189,15 @@ def _clean_up_warnings():  # 5.4
     _previous_warning = ''
 
 def _warn(s=''):
-    global _previous_times
-    global _previous_warning
-    if s == _previous_warning:  # 5.4
-        _previous_times = _previous_times + 1
-    else:
-        _clean_up_warnings()
-        sys.stderr.write(str(s)+"\n")
-        _previous_warning = s
+    if enable_warnings:
+        global _previous_times
+        global _previous_warning
+        if s == _previous_warning:  # 5.4
+            _previous_times = _previous_times + 1
+        else:
+            _clean_up_warnings()
+            sys.stderr.write(str(s)+"\n")
+            _previous_warning = s
 
 def _some_text_event(which_kind=0x01, text=b'some_text'):
     if str(type(text)).find("'str'") >= 0:   # 6.4 test for back-compatibility
