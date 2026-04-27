@@ -3,7 +3,6 @@
 r'''###############################################################################
 ###################################################################################
 #
-#
 #	MIDI Splitter Python Module
 #	Version 1.0
 #
@@ -12,7 +11,6 @@ r'''############################################################################
 #	Tegridy Code 2026
 #
 #   https://github.com/Tegridy-Code/Project-Los-Angeles
-#
 #
 ###################################################################################
 ###################################################################################
@@ -51,8 +49,8 @@ print('=' * 70)
 ###################################################################################
 
 import os
-
 import copy
+import statistics
 
 from .constants import Number2patch, Number2drumkit
 
@@ -61,11 +59,34 @@ from .MIDI import midi2score, score2midi
 ###################################################################################
 ###################################################################################
 
-instrument_name = lambda s: ''.join(c for c in s.lower().replace('(', ' ').replace(')', ' ').strip() if c.isalpha() or c==' ').strip().replace('  ', '_').replace(' ', '_')
+special_events = ['key_after_touch',
+                  'control_change',
+                  'channel_after_touch',
+                  'pitch_wheel_change'
+                 ]
+
+special_merge_events = ['key_after_touch',
+                        'control_change',
+                        'patch_change',
+                        'channel_after_touch',
+                        'pitch_wheel_change'
+                       ]
 
 ###################################################################################
 
-special_events = ['key_after_touch', 'control_change', 'channel_after_touch', 'pitch_wheel_change']
+instrument_name = lambda s: ''.join(c for c in s.lower().replace('(', ' ').replace(')', ' ').strip()
+                                    if c.isalpha() or c==' ').strip().replace('  ', '_').replace(' ', '_')
+
+###################################################################################
+
+def set_of_sublists(list_of_lists):
+    seen = set()
+    add = seen.add
+    
+    for sub in list_of_lists:
+        add(tuple(sub))
+        
+    return [list(t) for t in seen]
 
 ###################################################################################
 
@@ -255,6 +276,69 @@ def split_midi(midi_file, output_dir=None):
                 midi_file.write(midi_data)
                 midi_file.close()
 
+###################################################################################
+
+def merge_midis(midi_files_list: list,
+                output_midi_name: str = 'merged.mid',
+                output_midi_ticks: int = -1
+                ):
+
+    """
+    Merges split MIDIs back into one MIDI
+    """
+
+    if midi_files_list:
+
+        all_midi_scores = []
+        
+        for midi_file in midi_files_list:
+            if os.path.isfile(midi_file):
+                score = midi2score(open(midi_file, 'rb').read())
+
+                if score and score[1]:
+                    all_midi_scores.append(score)
+
+        if all_midi_scores:
+            if output_midi_ticks > 0:
+                mticks = output_midi_ticks
+
+            else:
+                mticks = statistics.mode([s[0] for s in all_midi_scores])
+
+            all_midi_scores_flat = []
+    
+            for cha, midi_score in enumerate(all_midi_scores):
+
+                cha = cha % 15
+
+                if cha == 9:
+                    cha += 1
+                
+                for track in midi_score[1:]:
+                    for e in track:
+                        if e[0] == 'note' and e[3] != 9:
+                            e[3] = cha
+
+                        if e[0] in special_merge_events and e[2] != 9:
+                            e[2] = cha
+                            
+                    all_midi_scores_flat.extend(track)
+
+            final_score = sorted(set_of_sublists(all_midi_scores_flat),
+                                 key= lambda x: x[1]
+                                )
+
+            final_score = [mticks, final_score]
+
+            midi_data = score2midi(final_score)
+
+            try:
+                with open(output_midi_name, 'wb') as fi:
+                    fi.write(midi_data)
+
+            except:
+                pass
+                
 ###################################################################################
 
 print('Module is loaded!')

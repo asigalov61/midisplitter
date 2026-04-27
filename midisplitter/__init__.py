@@ -1,1 +1,1 @@
-from .midisplitter import split_midi
+from .midisplitter import split_midi, merge_midis
